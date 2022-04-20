@@ -23,10 +23,25 @@ type PingRequester struct {
 	outc chan *PingOutput
 }
 
+// NewPingOutput creates a new instance of PingOutput
+func NewPingOutput(details *ResultDetails, data json.RawMessage) (*PingOutput, error) {
+	output := &PingOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // PingOutput is the output from the ping action
 type PingOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewPingResult creates a new instance of PingResult
+func NewPingResult(ddl *agent.DDL) *PingResult {
+	return &PingResult{ddl: ddl}
 }
 
 // PingResult is the result from a ping action
@@ -36,6 +51,15 @@ type PingResult struct {
 	outputs    []*PingOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *PingResult) RecordResult(output *PingOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *PingResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *PingOutput) ParsePingOutput(target interface{}) error {
 
 // Do performs the request
 func (d *PingRequester) Do(ctx context.Context) (*PingResult, error) {
-	dres := &PingResult{ddl: d.r.client.ddl}
+	dres := NewPingResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *PingRequester) Do(ctx context.Context) (*PingResult, error) {
 			return
 		}
 
-		output := &PingOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewPingOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *PingRequester) Do(ctx context.Context) (*PingResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

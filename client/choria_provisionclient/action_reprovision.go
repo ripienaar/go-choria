@@ -23,10 +23,25 @@ type ReprovisionRequester struct {
 	outc chan *ReprovisionOutput
 }
 
+// NewReprovisionOutput creates a new instance of ReprovisionOutput
+func NewReprovisionOutput(details *ResultDetails, data json.RawMessage) (*ReprovisionOutput, error) {
+	output := &ReprovisionOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // ReprovisionOutput is the output from the reprovision action
 type ReprovisionOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewReprovisionResult creates a new instance of ReprovisionResult
+func NewReprovisionResult(ddl *agent.DDL) *ReprovisionResult {
+	return &ReprovisionResult{ddl: ddl}
 }
 
 // ReprovisionResult is the result from a reprovision action
@@ -36,6 +51,15 @@ type ReprovisionResult struct {
 	outputs    []*ReprovisionOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *ReprovisionResult) RecordResult(output *ReprovisionOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *ReprovisionResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *ReprovisionOutput) ParseReprovisionOutput(target interface{}) error {
 
 // Do performs the request
 func (d *ReprovisionRequester) Do(ctx context.Context) (*ReprovisionResult, error) {
-	dres := &ReprovisionResult{ddl: d.r.client.ddl}
+	dres := NewReprovisionResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *ReprovisionRequester) Do(ctx context.Context) (*ReprovisionResult, erro
 			return
 		}
 
-		output := &ReprovisionOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewReprovisionOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *ReprovisionRequester) Do(ctx context.Context) (*ReprovisionResult, erro
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

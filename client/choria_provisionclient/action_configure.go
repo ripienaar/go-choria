@@ -23,10 +23,25 @@ type ConfigureRequester struct {
 	outc chan *ConfigureOutput
 }
 
+// NewConfigureOutput creates a new instance of ConfigureOutput
+func NewConfigureOutput(details *ResultDetails, data json.RawMessage) (*ConfigureOutput, error) {
+	output := &ConfigureOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // ConfigureOutput is the output from the configure action
 type ConfigureOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewConfigureResult creates a new instance of ConfigureResult
+func NewConfigureResult(ddl *agent.DDL) *ConfigureResult {
+	return &ConfigureResult{ddl: ddl}
 }
 
 // ConfigureResult is the result from a configure action
@@ -36,6 +51,15 @@ type ConfigureResult struct {
 	outputs    []*ConfigureOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *ConfigureResult) RecordResult(output *ConfigureOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *ConfigureResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *ConfigureOutput) ParseConfigureOutput(target interface{}) error {
 
 // Do performs the request
 func (d *ConfigureRequester) Do(ctx context.Context) (*ConfigureResult, error) {
-	dres := &ConfigureResult{ddl: d.r.client.ddl}
+	dres := NewConfigureResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *ConfigureRequester) Do(ctx context.Context) (*ConfigureResult, error) {
 			return
 		}
 
-		output := &ConfigureOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewConfigureOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *ConfigureRequester) Do(ctx context.Context) (*ConfigureResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

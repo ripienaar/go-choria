@@ -23,10 +23,25 @@ type MaintenanceRequester struct {
 	outc chan *MaintenanceOutput
 }
 
+// NewMaintenanceOutput creates a new instance of MaintenanceOutput
+func NewMaintenanceOutput(details *ResultDetails, data json.RawMessage) (*MaintenanceOutput, error) {
+	output := &MaintenanceOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // MaintenanceOutput is the output from the maintenance action
 type MaintenanceOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewMaintenanceResult creates a new instance of MaintenanceResult
+func NewMaintenanceResult(ddl *agent.DDL) *MaintenanceResult {
+	return &MaintenanceResult{ddl: ddl}
 }
 
 // MaintenanceResult is the result from a maintenance action
@@ -36,6 +51,15 @@ type MaintenanceResult struct {
 	outputs    []*MaintenanceOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *MaintenanceResult) RecordResult(output *MaintenanceOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *MaintenanceResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *MaintenanceOutput) ParseMaintenanceOutput(target interface{}) error {
 
 // Do performs the request
 func (d *MaintenanceRequester) Do(ctx context.Context) (*MaintenanceResult, error) {
-	dres := &MaintenanceResult{ddl: d.r.client.ddl}
+	dres := NewMaintenanceResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *MaintenanceRequester) Do(ctx context.Context) (*MaintenanceResult, erro
 			return
 		}
 
-		output := &MaintenanceOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewMaintenanceOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *MaintenanceRequester) Do(ctx context.Context) (*MaintenanceResult, erro
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

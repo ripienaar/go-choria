@@ -23,10 +23,25 @@ type GetConfigItemRequester struct {
 	outc chan *GetConfigItemOutput
 }
 
+// NewGetConfigItemOutput creates a new instance of GetConfigItemOutput
+func NewGetConfigItemOutput(details *ResultDetails, data json.RawMessage) (*GetConfigItemOutput, error) {
+	output := &GetConfigItemOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // GetConfigItemOutput is the output from the get_config_item action
 type GetConfigItemOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewGetConfigItemResult creates a new instance of GetConfigItemResult
+func NewGetConfigItemResult(ddl *agent.DDL) *GetConfigItemResult {
+	return &GetConfigItemResult{ddl: ddl}
 }
 
 // GetConfigItemResult is the result from a get_config_item action
@@ -36,6 +51,15 @@ type GetConfigItemResult struct {
 	outputs    []*GetConfigItemOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *GetConfigItemResult) RecordResult(output *GetConfigItemOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *GetConfigItemResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *GetConfigItemOutput) ParseGetConfigItemOutput(target interface{}) error
 
 // Do performs the request
 func (d *GetConfigItemRequester) Do(ctx context.Context) (*GetConfigItemResult, error) {
-	dres := &GetConfigItemResult{ddl: d.r.client.ddl}
+	dres := NewGetConfigItemResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *GetConfigItemRequester) Do(ctx context.Context) (*GetConfigItemResult, 
 			return
 		}
 
-		output := &GetConfigItemOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewGetConfigItemOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *GetConfigItemRequester) Do(ctx context.Context) (*GetConfigItemResult, 
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

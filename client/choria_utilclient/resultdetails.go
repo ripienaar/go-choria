@@ -16,6 +16,16 @@ type ResultDetails struct {
 	ts      time.Time
 }
 
+// NewResultDetails creates an instance of ResultDetails
+func NewResultDetails(sender string, statusCode int, statusMsg string, ts time.Time) *ResultDetails {
+	return &ResultDetails{
+		sender:  sender,
+		code:    statusCode,
+		message: statusMsg,
+		ts:      ts,
+	}
+}
+
 // StatusCode is a reply status as defined by MCollective SimpleRPC - integers 0 to 5
 //
 // See the constants OK, RPCAborted, UnknownRPCAction, MissingRPCData, InvalidRPCData and UnknownRPCError

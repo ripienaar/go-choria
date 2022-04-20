@@ -23,10 +23,25 @@ type GetDataRequester struct {
 	outc chan *GetDataOutput
 }
 
+// NewGetDataOutput creates a new instance of GetDataOutput
+func NewGetDataOutput(details *ResultDetails, data json.RawMessage) (*GetDataOutput, error) {
+	output := &GetDataOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // GetDataOutput is the output from the get_data action
 type GetDataOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewGetDataResult creates a new instance of GetDataResult
+func NewGetDataResult(ddl *agent.DDL) *GetDataResult {
+	return &GetDataResult{ddl: ddl}
 }
 
 // GetDataResult is the result from a get_data action
@@ -36,6 +51,15 @@ type GetDataResult struct {
 	outputs    []*GetDataOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *GetDataResult) RecordResult(output *GetDataOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *GetDataResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *GetDataOutput) ParseGetDataOutput(target interface{}) error {
 
 // Do performs the request
 func (d *GetDataRequester) Do(ctx context.Context) (*GetDataResult, error) {
-	dres := &GetDataResult{ddl: d.r.client.ddl}
+	dres := NewGetDataResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *GetDataRequester) Do(ctx context.Context) (*GetDataResult, error) {
 			return
 		}
 
-		output := &GetDataOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewGetDataOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *GetDataRequester) Do(ctx context.Context) (*GetDataResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

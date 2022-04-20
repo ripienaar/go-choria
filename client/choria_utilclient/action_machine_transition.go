@@ -23,10 +23,25 @@ type MachineTransitionRequester struct {
 	outc chan *MachineTransitionOutput
 }
 
+// NewMachineTransitionOutput creates a new instance of MachineTransitionOutput
+func NewMachineTransitionOutput(details *ResultDetails, data json.RawMessage) (*MachineTransitionOutput, error) {
+	output := &MachineTransitionOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // MachineTransitionOutput is the output from the machine_transition action
 type MachineTransitionOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewMachineTransitionResult creates a new instance of MachineTransitionResult
+func NewMachineTransitionResult(ddl *agent.DDL) *MachineTransitionResult {
+	return &MachineTransitionResult{ddl: ddl}
 }
 
 // MachineTransitionResult is the result from a machine_transition action
@@ -36,6 +51,15 @@ type MachineTransitionResult struct {
 	outputs    []*MachineTransitionOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *MachineTransitionResult) RecordResult(output *MachineTransitionOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *MachineTransitionResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *MachineTransitionOutput) ParseMachineTransitionOutput(target interface{
 
 // Do performs the request
 func (d *MachineTransitionRequester) Do(ctx context.Context) (*MachineTransitionResult, error) {
-	dres := &MachineTransitionResult{ddl: d.r.client.ddl}
+	dres := NewMachineTransitionResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *MachineTransitionRequester) Do(ctx context.Context) (*MachineTransition
 			return
 		}
 
-		output := &MachineTransitionOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewMachineTransitionOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *MachineTransitionRequester) Do(ctx context.Context) (*MachineTransition
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

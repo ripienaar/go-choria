@@ -23,10 +23,25 @@ type RestartRequester struct {
 	outc chan *RestartOutput
 }
 
+// NewRestartOutput creates a new instance of RestartOutput
+func NewRestartOutput(details *ResultDetails, data json.RawMessage) (*RestartOutput, error) {
+	output := &RestartOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // RestartOutput is the output from the restart action
 type RestartOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewRestartResult creates a new instance of RestartResult
+func NewRestartResult(ddl *agent.DDL) *RestartResult {
+	return &RestartResult{ddl: ddl}
 }
 
 // RestartResult is the result from a restart action
@@ -36,6 +51,15 @@ type RestartResult struct {
 	outputs    []*RestartOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *RestartResult) RecordResult(output *RestartOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *RestartResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *RestartOutput) ParseRestartOutput(target interface{}) error {
 
 // Do performs the request
 func (d *RestartRequester) Do(ctx context.Context) (*RestartResult, error) {
-	dres := &RestartResult{ddl: d.r.client.ddl}
+	dres := NewRestartResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *RestartRequester) Do(ctx context.Context) (*RestartResult, error) {
 			return
 		}
 
-		output := &RestartOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewRestartOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *RestartRequester) Do(ctx context.Context) (*RestartResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

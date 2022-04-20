@@ -23,10 +23,25 @@ type DdlRequester struct {
 	outc chan *DdlOutput
 }
 
+// NewDdlOutput creates a new instance of DdlOutput
+func NewDdlOutput(details *ResultDetails, data json.RawMessage) (*DdlOutput, error) {
+	output := &DdlOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // DdlOutput is the output from the ddl action
 type DdlOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewDdlResult creates a new instance of DdlResult
+func NewDdlResult(ddl *agent.DDL) *DdlResult {
+	return &DdlResult{ddl: ddl}
 }
 
 // DdlResult is the result from a ddl action
@@ -36,6 +51,15 @@ type DdlResult struct {
 	outputs    []*DdlOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *DdlResult) RecordResult(output *DdlOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *DdlResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *DdlOutput) ParseDdlOutput(target interface{}) error {
 
 // Do performs the request
 func (d *DdlRequester) Do(ctx context.Context) (*DdlResult, error) {
-	dres := &DdlResult{ddl: d.r.client.ddl}
+	dres := NewDdlResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *DdlRequester) Do(ctx context.Context) (*DdlResult, error) {
 			return
 		}
 
-		output := &DdlOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewDdlOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *DdlRequester) Do(ctx context.Context) (*DdlResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

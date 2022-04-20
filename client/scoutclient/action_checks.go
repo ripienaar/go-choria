@@ -23,10 +23,25 @@ type ChecksRequester struct {
 	outc chan *ChecksOutput
 }
 
+// NewChecksOutput creates a new instance of ChecksOutput
+func NewChecksOutput(details *ResultDetails, data json.RawMessage) (*ChecksOutput, error) {
+	output := &ChecksOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // ChecksOutput is the output from the checks action
 type ChecksOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewChecksResult creates a new instance of ChecksResult
+func NewChecksResult(ddl *agent.DDL) *ChecksResult {
+	return &ChecksResult{ddl: ddl}
 }
 
 // ChecksResult is the result from a checks action
@@ -36,6 +51,15 @@ type ChecksResult struct {
 	outputs    []*ChecksOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *ChecksResult) RecordResult(output *ChecksOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *ChecksResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *ChecksOutput) ParseChecksOutput(target interface{}) error {
 
 // Do performs the request
 func (d *ChecksRequester) Do(ctx context.Context) (*ChecksResult, error) {
-	dres := &ChecksResult{ddl: d.r.client.ddl}
+	dres := NewChecksResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *ChecksRequester) Do(ctx context.Context) (*ChecksResult, error) {
 			return
 		}
 
-		output := &ChecksOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewChecksOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *ChecksRequester) Do(ctx context.Context) (*ChecksResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

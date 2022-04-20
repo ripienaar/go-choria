@@ -23,10 +23,25 @@ type SignRequester struct {
 	outc chan *SignOutput
 }
 
+// NewSignOutput creates a new instance of SignOutput
+func NewSignOutput(details *ResultDetails, data json.RawMessage) (*SignOutput, error) {
+	output := &SignOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // SignOutput is the output from the sign action
 type SignOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewSignResult creates a new instance of SignResult
+func NewSignResult(ddl *agent.DDL) *SignResult {
+	return &SignResult{ddl: ddl}
 }
 
 // SignResult is the result from a sign action
@@ -36,6 +51,15 @@ type SignResult struct {
 	outputs    []*SignOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *SignResult) RecordResult(output *SignOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *SignResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *SignOutput) ParseSignOutput(target interface{}) error {
 
 // Do performs the request
 func (d *SignRequester) Do(ctx context.Context) (*SignResult, error) {
-	dres := &SignResult{ddl: d.r.client.ddl}
+	dres := NewSignResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *SignRequester) Do(ctx context.Context) (*SignResult, error) {
 			return
 		}
 
-		output := &SignOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewSignOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *SignRequester) Do(ctx context.Context) (*SignResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

@@ -20,10 +20,25 @@ type {{ .ActionName | SnakeToCamel }}Requester struct {
 	outc chan *{{ .ActionName | SnakeToCamel }}Output
 }
 
+// New{{ .ActionName | SnakeToCamel }}Output creates a new instance of {{ .ActionName | SnakeToCamel }}Output
+func New{{ .ActionName | SnakeToCamel }}Output(details *ResultDetails, data json.RawMessage) (*{{ .ActionName | SnakeToCamel }}Output, error) {
+       output :=  &{{ .ActionName | SnakeToCamel }}Output{
+               reply:   make(map[string]interface{}),
+               details: details,
+       }
+
+       return output, json.Unmarshal(data, &output.reply)
+}
+
 // {{ .ActionName | SnakeToCamel }}Output is the output from the {{ .ActionName | ToLower }} action
 type {{ .ActionName | SnakeToCamel }}Output struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// New{{ .ActionName | SnakeToCamel }}Result creates a new instance of {{ .ActionName | SnakeToCamel }}Result
+func New{{ .ActionName | SnakeToCamel }}Result(ddl *agent.DDL) *{{ .ActionName | SnakeToCamel }}Result {
+       return &{{ .ActionName | SnakeToCamel }}Result{ddl: ddl}
 }
 
 // {{ .ActionName | SnakeToCamel }}Result is the result from a {{ .ActionName | ToLower }} action
@@ -33,6 +48,15 @@ type {{ .ActionName | SnakeToCamel }}Result struct {
 	outputs []*{{ .ActionName | SnakeToCamel }}Output
 	rpcreplies []*replyfmt.RPCReply
 	mu sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *{{ .ActionName | SnakeToCamel }}Result) RecordResult(output *{{ .ActionName | SnakeToCamel }}Output, reply *replyfmt.RPCReply) {
+       d.mu.Lock()
+       defer d.mu.Unlock()
+
+       d.outputs = append(d.outputs, output)
+       d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *{{ .ActionName | SnakeToCamel }}Result) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -105,7 +129,7 @@ func (d *{{ $.ActionName | SnakeToCamel }}Output) Parse{{ .ActionName | SnakeToC
 
 // Do performs the request
 func (d *{{ .ActionName | SnakeToCamel }}Requester) Do(ctx context.Context) (*{{ .ActionName | SnakeToCamel }}Result, error) {
-	dres := &{{ .ActionName | SnakeToCamel }}Result{ddl: d.r.client.ddl}
+	dres := New{{ .ActionName | SnakeToCamel }}Result(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -113,17 +137,7 @@ func (d *{{ .ActionName | SnakeToCamel }}Requester) Do(ctx context.Context) (*{{
 			return
 		}
 
-		output := &{{ .ActionName | SnakeToCamel }}Output{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := New{{ .ActionName | SnakeToCamel }}Output(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -136,13 +150,10 @@ func (d *{{ .ActionName | SnakeToCamel }}Requester) Do(ctx context.Context) (*{{
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

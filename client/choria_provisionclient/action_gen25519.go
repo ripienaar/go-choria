@@ -23,10 +23,25 @@ type Gen25519Requester struct {
 	outc chan *Gen25519Output
 }
 
+// NewGen25519Output creates a new instance of Gen25519Output
+func NewGen25519Output(details *ResultDetails, data json.RawMessage) (*Gen25519Output, error) {
+	output := &Gen25519Output{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // Gen25519Output is the output from the gen25519 action
 type Gen25519Output struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewGen25519Result creates a new instance of Gen25519Result
+func NewGen25519Result(ddl *agent.DDL) *Gen25519Result {
+	return &Gen25519Result{ddl: ddl}
 }
 
 // Gen25519Result is the result from a gen25519 action
@@ -36,6 +51,15 @@ type Gen25519Result struct {
 	outputs    []*Gen25519Output
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *Gen25519Result) RecordResult(output *Gen25519Output, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *Gen25519Result) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *Gen25519Output) ParseGen25519Output(target interface{}) error {
 
 // Do performs the request
 func (d *Gen25519Requester) Do(ctx context.Context) (*Gen25519Result, error) {
-	dres := &Gen25519Result{ddl: d.r.client.ddl}
+	dres := NewGen25519Result(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *Gen25519Requester) Do(ctx context.Context) (*Gen25519Result, error) {
 			return
 		}
 
-		output := &Gen25519Output{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewGen25519Output(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *Gen25519Requester) Do(ctx context.Context) (*Gen25519Result, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

@@ -23,10 +23,25 @@ type ResumeRequester struct {
 	outc chan *ResumeOutput
 }
 
+// NewResumeOutput creates a new instance of ResumeOutput
+func NewResumeOutput(details *ResultDetails, data json.RawMessage) (*ResumeOutput, error) {
+	output := &ResumeOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // ResumeOutput is the output from the resume action
 type ResumeOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewResumeResult creates a new instance of ResumeResult
+func NewResumeResult(ddl *agent.DDL) *ResumeResult {
+	return &ResumeResult{ddl: ddl}
 }
 
 // ResumeResult is the result from a resume action
@@ -36,6 +51,15 @@ type ResumeResult struct {
 	outputs    []*ResumeOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *ResumeResult) RecordResult(output *ResumeOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *ResumeResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *ResumeOutput) ParseResumeOutput(target interface{}) error {
 
 // Do performs the request
 func (d *ResumeRequester) Do(ctx context.Context) (*ResumeResult, error) {
-	dres := &ResumeResult{ddl: d.r.client.ddl}
+	dres := NewResumeResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *ResumeRequester) Do(ctx context.Context) (*ResumeResult, error) {
 			return
 		}
 
-		output := &ResumeOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewResumeOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *ResumeRequester) Do(ctx context.Context) (*ResumeResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

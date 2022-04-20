@@ -23,10 +23,25 @@ type DaemonStatsRequester struct {
 	outc chan *DaemonStatsOutput
 }
 
+// NewDaemonStatsOutput creates a new instance of DaemonStatsOutput
+func NewDaemonStatsOutput(details *ResultDetails, data json.RawMessage) (*DaemonStatsOutput, error) {
+	output := &DaemonStatsOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // DaemonStatsOutput is the output from the daemon_stats action
 type DaemonStatsOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewDaemonStatsResult creates a new instance of DaemonStatsResult
+func NewDaemonStatsResult(ddl *agent.DDL) *DaemonStatsResult {
+	return &DaemonStatsResult{ddl: ddl}
 }
 
 // DaemonStatsResult is the result from a daemon_stats action
@@ -36,6 +51,15 @@ type DaemonStatsResult struct {
 	outputs    []*DaemonStatsOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *DaemonStatsResult) RecordResult(output *DaemonStatsOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *DaemonStatsResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *DaemonStatsOutput) ParseDaemonStatsOutput(target interface{}) error {
 
 // Do performs the request
 func (d *DaemonStatsRequester) Do(ctx context.Context) (*DaemonStatsResult, error) {
-	dres := &DaemonStatsResult{ddl: d.r.client.ddl}
+	dres := NewDaemonStatsResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *DaemonStatsRequester) Do(ctx context.Context) (*DaemonStatsResult, erro
 			return
 		}
 
-		output := &DaemonStatsOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewDaemonStatsOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *DaemonStatsRequester) Do(ctx context.Context) (*DaemonStatsResult, erro
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

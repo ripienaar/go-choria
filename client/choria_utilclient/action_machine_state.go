@@ -23,10 +23,25 @@ type MachineStateRequester struct {
 	outc chan *MachineStateOutput
 }
 
+// NewMachineStateOutput creates a new instance of MachineStateOutput
+func NewMachineStateOutput(details *ResultDetails, data json.RawMessage) (*MachineStateOutput, error) {
+	output := &MachineStateOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // MachineStateOutput is the output from the machine_state action
 type MachineStateOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewMachineStateResult creates a new instance of MachineStateResult
+func NewMachineStateResult(ddl *agent.DDL) *MachineStateResult {
+	return &MachineStateResult{ddl: ddl}
 }
 
 // MachineStateResult is the result from a machine_state action
@@ -36,6 +51,15 @@ type MachineStateResult struct {
 	outputs    []*MachineStateOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *MachineStateResult) RecordResult(output *MachineStateOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *MachineStateResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *MachineStateOutput) ParseMachineStateOutput(target interface{}) error {
 
 // Do performs the request
 func (d *MachineStateRequester) Do(ctx context.Context) (*MachineStateResult, error) {
-	dres := &MachineStateResult{ddl: d.r.client.ddl}
+	dres := NewMachineStateResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *MachineStateRequester) Do(ctx context.Context) (*MachineStateResult, er
 			return
 		}
 
-		output := &MachineStateOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewMachineStateOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *MachineStateRequester) Do(ctx context.Context) (*MachineStateResult, er
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

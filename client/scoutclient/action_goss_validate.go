@@ -23,10 +23,25 @@ type GossValidateRequester struct {
 	outc chan *GossValidateOutput
 }
 
+// NewGossValidateOutput creates a new instance of GossValidateOutput
+func NewGossValidateOutput(details *ResultDetails, data json.RawMessage) (*GossValidateOutput, error) {
+	output := &GossValidateOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // GossValidateOutput is the output from the goss_validate action
 type GossValidateOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewGossValidateResult creates a new instance of GossValidateResult
+func NewGossValidateResult(ddl *agent.DDL) *GossValidateResult {
+	return &GossValidateResult{ddl: ddl}
 }
 
 // GossValidateResult is the result from a goss_validate action
@@ -36,6 +51,15 @@ type GossValidateResult struct {
 	outputs    []*GossValidateOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *GossValidateResult) RecordResult(output *GossValidateOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *GossValidateResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *GossValidateOutput) ParseGossValidateOutput(target interface{}) error {
 
 // Do performs the request
 func (d *GossValidateRequester) Do(ctx context.Context) (*GossValidateResult, error) {
-	dres := &GossValidateResult{ddl: d.r.client.ddl}
+	dres := NewGossValidateResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *GossValidateRequester) Do(ctx context.Context) (*GossValidateResult, er
 			return
 		}
 
-		output := &GossValidateOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewGossValidateOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *GossValidateRequester) Do(ctx context.Context) (*GossValidateResult, er
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

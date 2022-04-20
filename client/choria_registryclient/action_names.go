@@ -23,10 +23,25 @@ type NamesRequester struct {
 	outc chan *NamesOutput
 }
 
+// NewNamesOutput creates a new instance of NamesOutput
+func NewNamesOutput(details *ResultDetails, data json.RawMessage) (*NamesOutput, error) {
+	output := &NamesOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // NamesOutput is the output from the names action
 type NamesOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewNamesResult creates a new instance of NamesResult
+func NewNamesResult(ddl *agent.DDL) *NamesResult {
+	return &NamesResult{ddl: ddl}
 }
 
 // NamesResult is the result from a names action
@@ -36,6 +51,15 @@ type NamesResult struct {
 	outputs    []*NamesOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *NamesResult) RecordResult(output *NamesOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *NamesResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *NamesOutput) ParseNamesOutput(target interface{}) error {
 
 // Do performs the request
 func (d *NamesRequester) Do(ctx context.Context) (*NamesResult, error) {
-	dres := &NamesResult{ddl: d.r.client.ddl}
+	dres := NewNamesResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *NamesRequester) Do(ctx context.Context) (*NamesResult, error) {
 			return
 		}
 
-		output := &NamesOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewNamesOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *NamesRequester) Do(ctx context.Context) (*NamesResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

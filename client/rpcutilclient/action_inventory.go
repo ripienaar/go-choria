@@ -23,10 +23,25 @@ type InventoryRequester struct {
 	outc chan *InventoryOutput
 }
 
+// NewInventoryOutput creates a new instance of InventoryOutput
+func NewInventoryOutput(details *ResultDetails, data json.RawMessage) (*InventoryOutput, error) {
+	output := &InventoryOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // InventoryOutput is the output from the inventory action
 type InventoryOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewInventoryResult creates a new instance of InventoryResult
+func NewInventoryResult(ddl *agent.DDL) *InventoryResult {
+	return &InventoryResult{ddl: ddl}
 }
 
 // InventoryResult is the result from a inventory action
@@ -36,6 +51,15 @@ type InventoryResult struct {
 	outputs    []*InventoryOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *InventoryResult) RecordResult(output *InventoryOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *InventoryResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *InventoryOutput) ParseInventoryOutput(target interface{}) error {
 
 // Do performs the request
 func (d *InventoryRequester) Do(ctx context.Context) (*InventoryResult, error) {
-	dres := &InventoryResult{ddl: d.r.client.ddl}
+	dres := NewInventoryResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *InventoryRequester) Do(ctx context.Context) (*InventoryResult, error) {
 			return
 		}
 
-		output := &InventoryOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewInventoryOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *InventoryRequester) Do(ctx context.Context) (*InventoryResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)

@@ -23,10 +23,25 @@ type TriggerRequester struct {
 	outc chan *TriggerOutput
 }
 
+// NewTriggerOutput creates a new instance of TriggerOutput
+func NewTriggerOutput(details *ResultDetails, data json.RawMessage) (*TriggerOutput, error) {
+	output := &TriggerOutput{
+		reply:   make(map[string]interface{}),
+		details: details,
+	}
+
+	return output, json.Unmarshal(data, &output.reply)
+}
+
 // TriggerOutput is the output from the trigger action
 type TriggerOutput struct {
 	details *ResultDetails
 	reply   map[string]interface{}
+}
+
+// NewTriggerResult creates a new instance of TriggerResult
+func NewTriggerResult(ddl *agent.DDL) *TriggerResult {
+	return &TriggerResult{ddl: ddl}
 }
 
 // TriggerResult is the result from a trigger action
@@ -36,6 +51,15 @@ type TriggerResult struct {
 	outputs    []*TriggerOutput
 	rpcreplies []*replyfmt.RPCReply
 	mu         sync.Mutex
+}
+
+// RecordResult records a new output into the result
+func (d *TriggerResult) RecordResult(output *TriggerOutput, reply *replyfmt.RPCReply) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.outputs = append(d.outputs, output)
+	d.rpcreplies = append(d.rpcreplies, reply)
 }
 
 func (d *TriggerResult) RenderResults(w io.Writer, format RenderFormat, displayMode DisplayMode, verbose bool, silent bool, colorize bool, log Log) error {
@@ -108,7 +132,7 @@ func (d *TriggerOutput) ParseTriggerOutput(target interface{}) error {
 
 // Do performs the request
 func (d *TriggerRequester) Do(ctx context.Context) (*TriggerResult, error) {
-	dres := &TriggerResult{ddl: d.r.client.ddl}
+	dres := NewTriggerResult(d.r.client.ddl)
 
 	handler := func(pr protocol.Reply, r *rpcclient.RPCReply) {
 		// filtered by expr filter
@@ -116,17 +140,7 @@ func (d *TriggerRequester) Do(ctx context.Context) (*TriggerResult, error) {
 			return
 		}
 
-		output := &TriggerOutput{
-			reply: make(map[string]interface{}),
-			details: &ResultDetails{
-				sender:  pr.SenderID(),
-				code:    int(r.Statuscode),
-				message: r.Statusmsg,
-				ts:      pr.Time(),
-			},
-		}
-
-		err := json.Unmarshal(r.Data, &output.reply)
+		output, err := NewTriggerOutput(NewResultDetails(pr.SenderID(), int(r.Statuscode), r.Statusmsg, pr.Time()), r.Data)
 		if err != nil {
 			d.r.client.errorf("Could not decode reply from %s: %s", pr.SenderID(), err)
 		}
@@ -139,13 +153,10 @@ func (d *TriggerRequester) Do(ctx context.Context) (*TriggerResult, error) {
 		}
 
 		// else prepare our result set
-		dres.mu.Lock()
-		dres.outputs = append(dres.outputs, output)
-		dres.rpcreplies = append(dres.rpcreplies, &replyfmt.RPCReply{
+		dres.RecordResult(output, &replyfmt.RPCReply{
 			Sender:   pr.SenderID(),
 			RPCReply: r,
 		})
-		dres.mu.Unlock()
 	}
 
 	res, err := d.r.do(ctx, handler)
